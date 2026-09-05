@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import replace
@@ -25,6 +26,13 @@ from citeforge.refresh.inventory import (
 from citeforge.refresh.ledger import FaultInjectedError, Ledger, PlannedTask, ProviderObservation, RequestSpec, TaskSpec
 from citeforge.refresh.transport import LedgerTransport, SendOperation
 from citeforge.refresh.types import GenerationSpec, GenerationState, RunStatus, TaskDisposition
+
+# RefreshEngine.run compares the bound discovery epoch against its own
+# wall clock, so a literal month here is a time bomb that detonates in the
+# next calendar month. Derive it exactly as citeforge/refresh/engine.py does.
+CURRENT_EPOCH = datetime.now(timezone.utc).strftime("%Y-%m")
+# A month the engine can never consider current, for the staleness guard.
+STALE_EPOCH = (datetime.now(timezone.utc).replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
 
 
 def _spec() -> GenerationSpec:
@@ -438,7 +446,7 @@ def test_generation_start_binds_discovery_preflight_before_inventory_send(tmp_pa
         "serply": "1",
     }
     policy = DiscoveryPolicy(
-        "2026-08",
+        CURRENT_EPOCH,
         adapters,
         {
             "arxiv": 10,
@@ -466,7 +474,7 @@ def test_generation_start_binds_discovery_preflight_before_inventory_send(tmp_pa
     with Ledger.open(tmp_path / "ledger.db") as ledger:
         result = RefreshEngine(
             ledger,
-            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch=CURRENT_EPOCH),
             LedgerTransport(ledger, send_once=send_once),
         ).run(
             full_spec,
@@ -476,6 +484,7 @@ def test_generation_start_binds_discovery_preflight_before_inventory_send(tmp_pa
             discovery_credentials=DiscoveryCredentials(),
         )
         assert result.status is RunStatus.INVALID_CONFIGURATION
+        assert result.detail == "required s2 discovery credential is unavailable"
         assert calls == 0
         assert ledger.manifest().data["tasks"] == []
 
@@ -497,7 +506,7 @@ def test_generation_start_rejects_stale_discovery_epoch_before_binding(tmp_path:
     }
     spec = GenerationSpec(base.census, base.refresh_policy_version, {**adapters, "scholar": "1"}, base.base_commit)
     policy = DiscoveryPolicy(
-        "2026-07",
+        STALE_EPOCH,
         adapters,
         {
             "arxiv": 10,
@@ -519,7 +528,7 @@ def test_generation_start_rejects_stale_discovery_epoch_before_binding(tmp_path:
     with Ledger.open(tmp_path / "ledger.db") as ledger:
         result = RefreshEngine(
             ledger,
-            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch=CURRENT_EPOCH),
         ).run(
             spec,
             RefreshCredentials(serpapi_key="inventory-secret"),
@@ -528,6 +537,7 @@ def test_generation_start_rejects_stale_discovery_epoch_before_binding(tmp_path:
             discovery_credentials=DiscoveryCredentials(s2_key="wire-only"),
         )
         assert result.status is RunStatus.INVALID_CONFIGURATION
+        assert result.detail == "discovery freshness does not match the code-owned inventory epoch"
         assert ledger._connection.execute("SELECT COUNT(*) FROM discovery_policy_authority").fetchone()[0] == 0
         assert ledger.plan_status().revision == 0
 
@@ -1323,3 +1333,29 @@ def test_every_blocked_return_seals_a_checkpoint_first() -> None:
         if "_save_checkpoint" not in window and not entry_guard and not inside_blocker:
             unsealed.append(lines[index].strip())
     assert not unsealed, f"blocked returns with no checkpoint seal above them: {unsealed}"
+
+
+def test_no_refresh_test_pins_a_literal_freshness_epoch() -> None:
+    """No engine-driving test may hardcode the month it was written in.
+
+    ``RefreshEngine.run`` compares the bound discovery epoch against its own
+    wall clock, so a literal ``"YYYY-MM"`` in a test that reaches that guard
+    passes for exactly one calendar month and then fails every run afterwards
+    on every interpreter at once. On 2026-09-01 four tests in
+    ``test_refresh_discovery.py`` detonated this way and blocked every open
+    pull request. Epochs are derived from ``datetime.now`` or built as an
+    explicit relative offset, never written down.
+    """
+    # Double-quoted only. The single-quoted months in test_refresh_corpus.py
+    # live inside SQL that deliberately writes a mismatching epoch to trip a
+    # drift guard, and are not policy values the engine compares to its clock.
+    literal = re.compile(r'"\d{4}-(?:0[1-9]|1[0-2])"')
+    offenders = []
+    for path in sorted((Path(__file__).parent).glob("test_refresh_*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "RefreshEngine" not in source:
+            continue
+        for number, line in enumerate(source.splitlines(), start=1):
+            if literal.search(line) and "noqa: epoch-literal" not in line:
+                offenders.append(f"{path.name}:{number}: {line.strip()}")
+    assert not offenders, "literal freshness epochs in engine-driving tests: " + "; ".join(offenders)
