@@ -48,6 +48,10 @@ from citeforge.refresh.transport import LedgerTransport, SendOperation
 from citeforge.refresh.types import GenerationSpec, TaskDisposition
 
 NOW = datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
+# RefreshEngine.run compares the bound discovery epoch against its own
+# wall clock, so a literal month here is a time bomb that detonates in the
+# next calendar month. Derive it exactly as citeforge/refresh/engine.py does.
+CURRENT_EPOCH = datetime.now(timezone.utc).strftime("%Y-%m")
 _GIT = shutil.which("git") or "git"
 
 
@@ -94,7 +98,7 @@ def _real_corpus_authority(
 
 def _policy(*, max_scholar_pages: int = 10, max_html_probe_waves: int = 8) -> DiscoveryPolicy:
     return DiscoveryPolicy(
-        freshness_epoch="2026-08",
+        freshness_epoch=CURRENT_EPOCH,
         adapter_versions={
             "arxiv": "1",
             "crossref": "1",
@@ -215,7 +219,7 @@ def test_known_doi_wave_adopts_exact_task5b_csl_identity() -> None:
         {"doi": "10.1234/existing"},
         ("metadata",),
         "1",
-        "2026-08",
+        CURRENT_EPOCH,
         "doi",
     )
     existing = TaskSpec("author-ada", "pub-one", "doi_csl", "csl_lookup", existing_request)
@@ -888,7 +892,7 @@ def test_bound_disabled_s2_shapes_inventory_union_as_typed_applicability(tmp_pat
         ledger.bind_discovery_policy(policy, DiscoveryCredentials())
         result = RefreshEngine(
             ledger,
-            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch=CURRENT_EPOCH),
             LedgerTransport(ledger, send_once=send_once),
         ).run(spec, RefreshCredentials(serpapi_key="wire-only"), lambda: False)
         assert result.status.value == "continuation", result.detail
@@ -955,7 +959,7 @@ def test_atomic_known_doi_wave_commits_complete_round_and_replays(tmp_path: Path
         ledger.bind_discovery_policy(policy, credentials)
         result = RefreshEngine(
             ledger,
-            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch=CURRENT_EPOCH),
             LedgerTransport(ledger, send_once=send_once),
         ).run(spec, RefreshCredentials(serpapi_key="wire-only"), lambda: False)
         assert result.status.value == "continuation"
@@ -1165,7 +1169,7 @@ def test_zero_seed_generation_commits_and_replays_complete_c4_chain(tmp_path: Pa
         ledger.bind_discovery_policy(policy, DiscoveryCredentials())
         result = RefreshEngine(
             ledger,
-            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch=CURRENT_EPOCH),
             LedgerTransport(ledger, send_once=send_empty),
         ).run(spec, RefreshCredentials(serpapi_key="wire-only"), lambda: False)
         assert result.status.value == "continuation"
@@ -1304,7 +1308,7 @@ def test_atomic_venue_fallback_consumes_crossref_and_expands_openalex(tmp_path: 
         ledger.bind_discovery_policy(policy, DiscoveryCredentials(s2_key="wire-only"))
         result = RefreshEngine(
             ledger,
-            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch=CURRENT_EPOCH),
             LedgerTransport(ledger, send_once=send_empty),
         ).run(spec, RefreshCredentials(serpapi_key="wire-only"), lambda: False)
         assert result.status.value == "continuation"
